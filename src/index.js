@@ -35,7 +35,7 @@ class ServerlessOfflineKinesis {
   }
 
   eventHandler(streamEvent, functionName, shardId, chunk, cb) {
-    const streamName = streamEvent.arn.split('/')[1];
+    const streamName = streamEvent.name;
     this.serverless.cli.log(`${streamName} (λ: ${functionName})`);
 
     const {location = '.'} = this.service.custom['serverless-offline'];
@@ -78,7 +78,7 @@ class ServerlessOfflineKinesis {
   }
 
   async createKinesisReadable(functionName, streamEvent) {
-    const streamName = streamEvent.arn.split('/')[1];
+    const streamName = streamEvent.name;
 
     this.serverless.cli.log(`${streamName}`);
 
