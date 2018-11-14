@@ -3,7 +3,17 @@ const {Writable} = require('stream');
 const figures = require('figures');
 const Kinesis = require('aws-sdk/clients/kinesis');
 const KinesisReadable = require('kinesis-readable');
-const {mapValues, isEmpty, forEach, map, matchesProperty, filter, get, pipe} = require('lodash/fp');
+const {
+  filter,
+  forEach,
+  get,
+  isEmpty,
+  map,
+  mapValues,
+  matchesProperty,
+  pipe,
+  startsWith
+} = require('lodash/fp');
 const {createHandler, getFunctionOptions} = require('serverless-offline/src/functionHelper');
 const createLambdaContext = require('serverless-offline/src/createLambdaContext');
 
@@ -17,12 +27,22 @@ const fromCallback = fun =>
 
 const printBlankLine = () => console.log();
 
+const getConfig = (service, pluginName) => {
+  return (service && service.custom && service.custom[pluginName]) || {};
+};
+
+const extractStreamNameFromARN = arn => {
+  const [, , , , , StreamURI] = arn.split(':');
+  const [, ...StreamNames] = StreamURI.split('/');
+  return StreamNames.join('/');
+};
+
 class ServerlessOfflineKinesis {
   constructor(serverless, options) {
     this.serverless = serverless;
     this.service = serverless.service;
     this.options = options;
-    this.config = this.service.custom['serverless-offline-kinesis'];
+    this.config = getConfig(this.service, 'serverless-offline-kinesis');
 
     this.commands = {};
 
@@ -34,13 +54,33 @@ class ServerlessOfflineKinesis {
     this.streams = [];
   }
 
+  getClient() {
+    const awsConfig = Object.assign(
+      {
+        region: this.options.region || this.service.provider.region || 'us-west-2'
+      },
+      this.config
+    );
+    return new Kinesis(awsConfig);
+  }
+
   eventHandler(streamEvent, functionName, shardId, chunk, cb) {
-    const streamName = streamEvent.name;
+    const streamName = this.getStreamName(streamEvent);
     this.serverless.cli.log(`${streamName} (λ: ${functionName})`);
 
-    const {location = '.'} = this.service.custom['serverless-offline'];
+    const {location = this.options.location || '.'} = getConfig(this.service, 'serverless-offline');
 
     const __function = this.service.getFunction(functionName);
+
+    const {env} = process;
+    const functionEnv = Object.assign(
+      {},
+      env,
+      get('service.provider.environment', this),
+      get('environment', __function)
+    );
+    process.env = functionEnv;
+
     const servicePath = join(this.serverless.config.servicePath, location);
     const funOptions = getFunctionOptions(__function, functionName, servicePath);
     const handler = createHandler(funOptions, {});
@@ -75,19 +115,43 @@ class ServerlessOfflineKinesis {
         .then(res => lambdaContext.done(null, res))
         .catch(lambdaContext.done);
     else handler(event, lambdaContext, lambdaContext.done);
+
+    process.env = env;
+  }
+
+  getStreamName(streamEvent) {
+    if (typeof streamEvent === 'string' && startsWith('arn:aws:kinesis', streamEvent))
+      return extractStreamNameFromARN(streamEvent);
+    if (typeof streamEvent.arn === 'string') return extractStreamNameFromARN(streamEvent.arn);
+    if (typeof streamEvent.streamName === 'string') return streamEvent.streamName;
+
+    if (streamEvent.arn['Fn::GetAtt']) {
+      const [ResourceName] = streamEvent.arn['Fn::GetAtt'];
+
+      if (
+        this.service &&
+        this.service.resources &&
+        this.service.resources.Resources &&
+        this.service.resources.Resources[ResourceName] &&
+        this.service.resources.Resources[ResourceName].Properties &&
+        typeof this.service.resources.Resources[ResourceName].Properties.Name === 'string'
+      )
+        return this.service.resources.Resources[ResourceName].Properties.Name;
+    }
+
+    throw new Error(
+      `StreamName not found. See https://github.com/godu/serverless/tree/master/packages/serverless-offline-kinesis#functions`
+    );
   }
 
   async createKinesisReadable(functionName, streamEvent) {
-    const streamName = streamEvent.name;
+    const client = this.getClient();
+    const streamName = this.getStreamName(streamEvent);
 
     this.serverless.cli.log(`${streamName}`);
 
-    if (!this.client) {
-      this.client = new Kinesis(this.config);
-    }
-
     const {StreamDescription: {Shards: shards}} = await fromCallback(cb =>
-      this.client.describeStream(
+      client.describeStream(
         {
           StreamName: streamName
         },
@@ -96,7 +160,7 @@ class ServerlessOfflineKinesis {
     );
 
     forEach(({ShardId: shardId}) => {
-      const readable = KinesisReadable(this.client, streamName, {
+      const readable = KinesisReadable(client, streamName, {
         shardId,
         limit: streamEvent.batchSize,
         iterator: streamEvent.startingPosition || 'TRIM_HORIZON'
@@ -119,7 +183,11 @@ class ServerlessOfflineKinesis {
     mapValues.convert({cap: false})((_function, functionName) => {
       const streams = pipe(
         get('events'),
-        filter(matchesProperty('stream.type', 'kinesis')),
+        filter(
+          event =>
+            matchesProperty('stream.type', 'kinesis')(event) ||
+            startsWith('arn:aws:kinesis', event.stream)
+        ),
         map(get('stream'))
       )(_function);
 
