@@ -18,7 +18,7 @@
   "license": "MIT",
   "dependencies": {
     "aws-sdk": "^2.271.1",
-    "figures": "^2.0.0",
+    "figures": "^3.0.0",
     "kinesis-readable": "^1.2.0",
     "lodash": "^4.17.10",
     "serverless-offline": "^3.25.6"
